@@ -6,6 +6,10 @@ import subprocess
 import shutil
 from pathlib import Path
 import argparse
+import base64
+import hashlib
+import getpass
+from cryptography.fernet import Fernet
 
 class CLIAssistant:
     def __init__(self):
@@ -17,6 +21,7 @@ class CLIAssistant:
             'calc': self.calculator,
             'note': self.note_manager,
             'todo': self.todo_manager,
+            'password': self.password_manager,
             'files': self.file_operations,
             'system': self.system_info,
             'convert': self.unit_converter,
@@ -32,14 +37,58 @@ class CLIAssistant:
         self.notes_file = self.data_dir / 'notes.json'
         self.todos_file = self.data_dir / 'todos.json'
         self.history_file = self.data_dir / 'history.json'
+        self.passwords_file = self.data_dir / 'passwords.enc'
+        self.key_file = self.data_dir / '.key'
         
         self.load_data()
+        self.setup_encryption()
         
     def load_data(self):
         """Load persistent data from files"""
         self.notes = self.load_json(self.notes_file, {})
         self.todos = self.load_json(self.todos_file, [])
         self.history = self.load_json(self.history_file, [])
+        
+    def setup_encryption(self):
+        """Setup encryption for password manager"""
+        if not self.key_file.exists():
+            # Generate a new key
+            key = Fernet.generate_key()
+            with open(self.key_file, 'wb') as f:
+                f.write(key)
+            # Restrict permissions on key file
+            os.chmod(self.key_file, 0o600)
+        
+        with open(self.key_file, 'rb') as f:
+            self.cipher = Fernet(f.read())
+            
+    def encrypt_data(self, data):
+        """Encrypt data"""
+        json_data = json.dumps(data)
+        return self.cipher.encrypt(json_data.encode())
+        
+    def decrypt_data(self, encrypted_data):
+        """Decrypt data"""
+        try:
+            decrypted = self.cipher.decrypt(encrypted_data)
+            return json.loads(decrypted.decode())
+        except:
+            return {}
+            
+    def load_passwords(self):
+        """Load encrypted passwords"""
+        if self.passwords_file.exists():
+            with open(self.passwords_file, 'rb') as f:
+                encrypted_data = f.read()
+                return self.decrypt_data(encrypted_data)
+        return {}
+        
+    def save_passwords(self, passwords):
+        """Save encrypted passwords"""
+        encrypted_data = self.encrypt_data(passwords)
+        with open(self.passwords_file, 'wb') as f:
+            f.write(encrypted_data)
+        os.chmod(self.passwords_file, 0o600)
         
     def load_json(self, file_path, default):
         """Load JSON data from file with error handling"""
@@ -83,6 +132,7 @@ Productivity:
   note          - Note management (add, list, delete, search)
   todo          - Todo list management (add, list, done, delete)
   calc          - Calculator (basic math operations)
+  password      - Secure password manager (add, get, list, delete, generate)
   
 System:
   system        - Show system information
@@ -98,6 +148,8 @@ Usage Examples:
   note add "Meeting notes" "Discussed project timeline"
   todo add "Buy groceries"
   calc 15 * 8 + 32
+  password add gmail myemail@gmail.com
+  password generate 16
   files ls /home/user
   convert 100 celsius fahrenheit
         """
@@ -190,6 +242,127 @@ Usage Examples:
                     found = True
             if not found:
                 print("No notes found matching the keyword")
+                
+    def password_manager(self, args):
+        """Secure password manager with encryption"""
+        if not args:
+            print("Usage: password <add|get|list|delete|generate> [arguments]")
+            return
+            
+        action = args[0].lower()
+        passwords = self.load_passwords()
+        
+        if action == 'add':
+            if len(args) < 2:
+                print("Usage: password add <service_name> [username]")
+                return
+                
+            service = args[1]
+            username = args[2] if len(args) > 2 else ""
+            
+            # Get password securely without echoing
+            password = getpass.getpass(f"Enter password for {service}: ")
+            confirm = getpass.getpass("Confirm password: ")
+            
+            if password != confirm:
+                print("Passwords don't match!")
+                return
+                
+            passwords[service] = {
+                'username': username,
+                'password': password,
+                'created': datetime.datetime.now().isoformat(),
+                'modified': datetime.datetime.now().isoformat()
+            }
+            
+            self.save_passwords(passwords)
+            print(f"Password for '{service}' saved successfully")
+            
+        elif action == 'get':
+            if len(args) < 2:
+                print("Usage: password get <service_name>")
+                return
+                
+            service = args[1]
+            if service in passwords:
+                entry = passwords[service]
+                print(f"\nService: {service}")
+                if entry['username']:
+                    print(f"Username: {entry['username']}")
+                print(f"Password: {entry['password']}")
+                print(f"Created: {entry['created'][:19]}")
+                print(f"Modified: {entry['modified'][:19]}")
+            else:
+                print(f"No password found for '{service}'")
+                
+        elif action == 'list':
+            if not passwords:
+                print("No passwords stored")
+                return
+                
+            print("\nStored passwords:")
+            for service, entry in passwords.items():
+                username_info = f" ({entry['username']})" if entry['username'] else ""
+                print(f"  - {service}{username_info}")
+                
+        elif action == 'delete':
+            if len(args) < 2:
+                print("Usage: password delete <service_name>")
+                return
+                
+            service = args[1]
+            if service in passwords:
+                confirm = input(f"Delete password for '{service}'? (yes/no): ")
+                if confirm.lower() in ['yes', 'y']:
+                    del passwords[service]
+                    self.save_passwords(passwords)
+                    print(f"Password for '{service}' deleted")
+                else:
+                    print("Deletion cancelled")
+            else:
+                print(f"No password found for '{service}'")
+                
+        elif action == 'generate':
+            length = 16
+            if len(args) > 1:
+                try:
+                    length = int(args[1])
+                    if length < 8:
+                        print("Password length should be at least 8 characters")
+                        return
+                    if length > 128:
+                        print("Password length should not exceed 128 characters")
+                        return
+                except ValueError:
+                    print("Invalid length. Using default length of 16")
+                    
+            import secrets
+            import string
+            
+            # Generate a strong password
+            alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;:,.<>?"
+            password = ''.join(secrets.choice(alphabet) for _ in range(length))
+            
+            print(f"\nGenerated password ({length} characters):")
+            print(password)
+            
+            save = input("\nSave this password? (yes/no): ")
+            if save.lower() in ['yes', 'y']:
+                service = input("Service name: ")
+                username = input("Username (optional): ")
+                
+                passwords[service] = {
+                    'username': username,
+                    'password': password,
+                    'created': datetime.datetime.now().isoformat(),
+                    'modified': datetime.datetime.now().isoformat()
+                }
+                
+                self.save_passwords(passwords)
+                print(f"Password for '{service}' saved successfully")
+        else:
+            print(f"Unknown action: {action}")
+            print("Available actions: add, get, list, delete, generate")
                 
     def todo_manager(self, args):
         """Todo list management"""
